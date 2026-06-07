@@ -1,1 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>GLB Viewer — Simple 3D Model Viewer</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    /* Minimal UI overlay: just file picker, clean and non-intrusive */
+    #viewer-ui {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(28, 28, 32, 0.85);
+      backdrop-filter: blur(8px);
+      border-radius: 40px;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      z-index: 20;
+      font-size: 14px;
+      font-weight: 500;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.2);
+      pointer-events: auto;
+      font-family: inherit;
+    }
+    .file-label {
+      background: #3a6ea5;
+      padding: 6px 16px;
+      border-radius: 32px;
+      color: white;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .file-label:hover {
+      background: #2c5282;
+    }
+    #file-name {
+      color: #e0e0e0;
+      font-size: 13px;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    input[type="file"] {
+      display: none;
+    }
+    .instruction {
+      color: #ccc;
+      font-size: 12px;
+      border-left: 1px solid #555;
+      padding-left: 12px;
+      margin-left: 4px;
+    }
+    @media (max-width: 550px) {
+      #viewer-ui { bottom: 12px; left: 12px; right: 12px; border-radius: 28px; flex-wrap: wrap; justify-content: center; gap: 8px; }
+      .instruction { border-left: none; padding-left: 0; margin-left: 0; }
+      #file-name { max-width: 150px; }
+    }
+    /* subtle loader hint while loading */
+    .loading-toast {
+      position: absolute;
+      bottom: 90px;
+      left: 20px;
+      background: rgba(0,0,0,0.7);
+      padding: 5px 12px;
+      border-radius: 20px;
+      color: #ffd966;
+      font-size: 12px;
+      pointer-events: none;
+      z-index: 20;
+      font-family: monospace;
+      transition: opacity 0.2s;
+    }
+  </style>
+</head>
+<body>
+  <div id="viewer-ui">
+    <label class="file-label">
+      <input type="file" id="glbFileInput" accept=".glb,.GLB" />
+      📁 Load GLB
+    </label>
+    <span id="file-name">No model loaded</span>
+    <span class="instruction">🖱️ Drag to orbit | Right-click pan | Scroll zoom</span>
+  </div>
+  <div id="loading-status" class="loading-toast" style="opacity:0;">—</div>
 
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    // --- Setup scene, camera, renderer (core view) ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111217);   // sleek dark background
+    scene.fog = new THREE.FogExp2(0x111217, 0.008); // subtle depth
+
+    // Camera: good default perspective
+    const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(4, 3, 6);
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true; // soft shadows improve quality
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    // --- Controls for smooth view interaction ---
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;          // inertia
+    controls.dampingFactor = 0.05;
+    controls.rotateSpeed = 1.2;
+    controls.zoomSpeed = 1.2;
+    controls.panSpeed = 0.8;
+    controls.screenSpacePanning = true;    // avoid panning tilt
+    controls.enableZoom = true;
+    controls.enablePan = true;
+    controls.target.set(0, 0, 0);
+    controls.update();
+
+    // --- Lighting: pleasant and balanced for showcasing geometry ---
+    // Ambient light (neutral fill)
+    const ambientLight = new THREE.AmbientLight(0x404060, 0.65);
+    scene.add(ambientLight);
+    
+    // Key light: directional from upper left
+    const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    mainLight.position.set(5, 8, 4);
+    mainLight.castShadow = true;
+    mainLight.receiveShadow = true;
+    mainLight.shadow.mapSize.width = 1024;
+    mainLight.shadow.mapSize.height = 1024;
+    mainLight.shadow.camera.near = 0.5;
+    mainLight.shadow.camera.far = 15;
+    mainLight.shadow.camera.left = -5;
+    mainLight.shadow.camera.right = 5;
+    mainLight.shadow.camera.top = 5;
+    mainLight.shadow.camera.bottom = -5;
+    scene.add(mainLight);
+    
+    // Fill light: warm from back-right
+    const fillLight = new THREE.PointLight(0xe0a060, 0.55);
+    fillLight.position.set(3, 2, -4);
+    scene.add(fillLight);
+    
+    // Rim light: cool from left-back to enhance edges
+    const rimLight = new THREE.PointLight(0x6080c0, 0.45);
+    rimLight.position.set(-3, 2.5, -5);
+    scene.add(rimLight);
+    
+    // Soft fill from below (optional)
+    const bottomFill = new THREE.PointLight(0x88aaff, 0.25);
+    bottomFill.position.set(0, -2, 0);
+    scene.add(bottomFill);
+    
+    // Optional helper: ground grid (subtle, does not distract) – helps spatial reference
+    const gridHelper = new THREE.GridHelper(12, 20, 0x88aaff, 0x335588);
+    gridHelper.position.y = -1.2;
+    gridHelper.material.transparent = true;
+    gridHelper.material.opacity = 0.25;
+    scene.add(gridHelper);
+    
+    // Simple axis helper (very discrete) can be removed but adds orientation, keep extremely light
+    // Not adding axes to keep visual clean
+    
+    // --- Model container: root group for loaded GLB ---
+    const modelRoot = new THREE.Group();
+    scene.add(modelRoot);
+    
+    // --- UI elements ---
+    const fileInput = document.getElementById('glbFileInput');
+    const fileNameSpan = document.getElementById('file-name');
+    const loadingStatusDiv = document.getElementById('loading-status');
+    
+    let currentModelGroup = null;     // reference to currently loaded model group
+    let loadingTimeout = null;
+    
+    // Helper: show temporary loading message
+    function showLoadingMessage(text, isError = false) {
+      loadingStatusDiv.style.opacity = '1';
+      loadingStatusDiv.style.backgroundColor = isError ? 'rgba(180, 50, 50, 0.85)' : 'rgba(0,0,0,0.75)';
+      loadingStatusDiv.style.color = isError ? '#ffbb99' : '#dddddd';
+      loadingStatusDiv.textContent = text;
+      if (loadingTimeout) clearTimeout(loadingTimeout);
+      loadingTimeout = setTimeout(() => {
+        loadingStatusDiv.style.opacity = '0';
+      }, 2800);
+    }
+    
+    // Reset camera view to perfectly frame the loaded model (based on bounding box)
+    function frameModel(model) {
+      if (!model) return;
+      // Compute bounding box of the model (including all descendants)
+      const bbox = new THREE.Box3().setFromObject(model);
+      const center = bbox.getCenter(new THREE.Vector3());
+      const size = bbox.getSize(new THREE.Vector3());
+      
+      // Compute distance needed to fit the model in view
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = camera.fov * (Math.PI / 180);
+      let distance = maxDim / (2 * Math.tan(fov / 2));
+      distance = Math.max(distance, 2.5); // minimum distance
+      
+      // Set camera position: offset along diagonal direction
+      const direction = new THREE.Vector3(1, 0.8, 1.2).normalize();
+      const newPos = center.clone().add(direction.multiplyScalar(distance * 1.1));
+      camera.position.copy(newPos);
+      controls.target.copy(center);
+      controls.update();
+    }
+    
+    // Clear previously loaded model from scene
+    function clearModel() {
+      while (modelRoot.children.length) {
+        const child = modelRoot.children[0];
+        if (child.isMesh || child.isGroup) {
+          // dispose geometries and materials to avoid memory leaks
+          if (child.isMesh) {
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+              if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+              else child.material.dispose();
+            }
+          } else if (child.children) {
+            // recursively handle nested meshes on removal? safer to just traverse but group removal will clear.
+            child.traverse((obj) => {
+              if (obj.isMesh) {
+                if (obj.geometry) obj.geometry.dispose();
+                if (obj.material) {
+                  if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+                  else obj.material.dispose();
+                }
+              }
+            });
+          }
+        }
+        modelRoot.remove(child);
+      }
+      currentModelGroup = null;
+    }
+    
+    // Load and display GLB file
+    function loadGLB(file) {
+      if (!file) return;
+      
+      // Validate file extension (basic)
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (ext !== 'glb') {
+        showLoadingMessage(`⚠️ "${file.name}" is not a .glb file`, true);
+        fileNameSpan.textContent = 'Invalid file';
+        return;
+      }
+      
+      fileNameSpan.textContent = file.name;
+      showLoadingMessage(`📦 Loading ${file.name} ...`, false);
+      
+      const url = URL.createObjectURL(file);
+      const loader = new GLTFLoader();
+      
+      loader.load(url, (gltf) => {
+        // Success: clear previous model
+        clearModel();
+        
+        const model = gltf.scene;
+        // Enable shadows and improve visual quality
+        model.traverse((node) => {
+          if (node.isMesh) {
+            node.castShadow = true;
+            node.receiveShadow = true;
+            // Ensure materials respond nicely to lights
+            if (node.material) {
+              if (Array.isArray(node.material)) {
+                node.material.forEach(mat => {
+                  mat.roughness = Math.max(0.3, mat.roughness || 0.5);
+                  mat.metalness = Math.min(0.8, mat.metalness || 0.2);
+                });
+              } else {
+                node.material.roughness = Math.max(0.3, node.material.roughness || 0.5);
+                node.material.metalness = Math.min(0.8, node.material.metalness || 0.2);
+              }
+            }
+          }
+        });
+        
+        modelRoot.add(model);
+        currentModelGroup = model;
+        
+        // Auto-frame the model in camera view
+        frameModel(modelRoot);
+        
+        // Small success message
+        showLoadingMessage(`✓ Model loaded: ${file.name}`, false);
+        
+        // Cleanup object URL
+        URL.revokeObjectURL(url);
+      }, (xhr) => {
+        // Optional progress (optional but nice)
+        const percent = Math.floor((xhr.loaded / xhr.total) * 100);
+        if (percent < 100) {
+          loadingStatusDiv.style.opacity = '1';
+          loadingStatusDiv.textContent = `⏳ Loading ${percent}%`;
+          if (loadingTimeout) clearTimeout(loadingTimeout);
+          loadingTimeout = setTimeout(() => {
+            if (loadingStatusDiv.textContent.includes('%')) 
+              loadingStatusDiv.style.opacity = '0.9';
+          }, 300);
+        }
+      }, (error) => {
+        console.error('GLB Load error:', error);
+        showLoadingMessage(`❌ Failed to load model: ${error.message || 'invalid GLB'}`, true);
+        fileNameSpan.textContent = 'Load failed';
+        URL.revokeObjectURL(url);
+      });
+    }
+    
+    // Event listener for file selection
+    fileInput.addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (file) {
+        loadGLB(file);
+      } else {
+        fileNameSpan.textContent = 'No model selected';
+      }
+      // reset input value to allow re-upload of same file again if needed
+      fileInput.value = '';
+    });
+    
+    // --- Optional: Handle window resize gracefully ---
+    window.addEventListener('resize', onWindowResize, false);
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    
+    // --- Simple decorative but unobtrusive: subtle rotating environment? No, but add a faint star/aura? Keep minimal.
+    // For extra depth, add very subtle background gradient via CSS? Not needed.
+    
+    // --- Animation loop: clean render with controls update ---
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update(); // only updates if damping or auto-rotate, but safe
+      renderer.render(scene, camera);
+    }
+    animate();
+    
+    // Small helper: if no model loaded, show a friendly hint after a delay (but never intrusive)
+    setTimeout(() => {
+      if (!currentModelGroup || modelRoot.children.length === 0) {
+        const hintMsg = document.createElement('div');
+        hintMsg.style.position = 'absolute';
+        hintMsg.style.bottom = '80px';
+        hintMsg.style.left = '20px';
+        hintMsg.style.backgroundColor = 'rgba(0,0,0,0.5)';
+        hintMsg.style.color = '#aaa';
+        hintMsg.style.padding = '5px 12px';
+        hintMsg.style.borderRadius = '20px';
+        hintMsg.style.fontSize = '12px';
+        hintMsg.style.pointerEvents = 'none';
+        hintMsg.style.fontFamily = 'monospace';
+        hintMsg.innerText = '✨ Click "Load GLB" to view your 3D model';
+        hintMsg.style.zIndex = '25';
+        document.body.appendChild(hintMsg);
+        setTimeout(() => { hintMsg.style.opacity = '0'; setTimeout(() => hintMsg.remove(), 1000); }, 5000);
+      }
+    }, 800);
+    
+    // small console greeting (polite)
+    console.log('GLB Viewer ready — pure view mode, no editing tools.');
+  </script>
+</body>
+</html>
